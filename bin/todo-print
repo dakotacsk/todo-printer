@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+VERSION="0.1.0"
+
+usage() {
+  cat <<'USAGE'
+todo-print — print a TODO on a receipt printer (one ticket per run)
+
+USAGE:
+  todo-print "MESSAGE (N points)"
+
+OPTIONS:
+  -p, --printer NAME   CUPS printer name (default: system default)
+  -w, --width-mm MM    Paper width in millimeters (default: 80)
+  -d, --dpi N          Render DPI (default: 203)
+  -s, --pointsize N    Font point size (default: auto)
+  -f, --font NAME      Font family (default: DejaVuSans-Bold)
+  -m, --margin PX      Margin (pixels) (default: 24)
+  -n, --no-fit         Don’t pass -o fit-to-page
+  -c, --cut            Force ESC/POS full cut (RAW queue only)
+  -V, --version        Show version
+  -h, --help           Show help
+USAGE
+}
+
+PRINTER_OPT=()
+WIDTH_MM=80
+DPI=203
+POINTSIZE=""
+FONT="DejaVuSans-Bold"
+MARGIN=24
+FIT_OPT=(-o fit-to-page)
+FORCE_CUT=0
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p|--printer) PRINTER_OPT=(-d "$2"); shift 2;;
+    -w|--width-mm) WIDTH_MM="$2"; shift 2;;
+    -d|--dpi) DPI="$2"; shift 2;;
+    -s|--pointsize) POINTSIZE="$2"; shift 2;;
+    -f|--font) FONT="$2"; shift 2;;
+    -m|--margin) MARGIN="$2"; shift 2;;
+    -n|--no-fit) FIT_OPT=(); shift;;
+    -c|--cut) FORCE_CUT=1; shift;;
+    -V|--version) echo "$VERSION"; exit 0;;
+    -h|--help) usage; exit 0;;
+    --) shift; break;;
+    -*) echo "Unknown option: $1" >&2; usage; exit 2;;
+    *)  ARGS+=("$1"); shift;;
+  esac
+done
+
+if [[ ${#ARGS[ @]} -eq 0 ]]; then
+  echo "Error: MESSAGE is required."; usage; exit 2
+fi
+MESSAGE="${ARGS[*]}"
+
+# compute width in pixels
+width_px=$(python3 - <<PY
+import math
+print(int(round(($WIDTH_MM/25.4)*$DPI)))
+PY
+)
+
+# default font size
+if [[ -z "$POINTSIZE" ]]; then
+  POINTSIZE=$(( width_px * 28 / 100 ))
+  (( POINTSIZE < 60 )) && POINTSIZE=60
+  (( POINTSIZE > 220 )) && POINTSIZE=220
+fi
+
+workdir="$(mktemp -d)"; trap 'rm -rf "$workdir"' EXIT
+img="$workdir/todo.png"
+
+convert -background white -fill black \
+  -gravity center -font "$FONT" -pointsize "$POINTSIZE" \
+  -size "${width_px}x3000" \
+  caption:"$MESSAGE" \
+  -trim +repage -bordercolor white -border "${MARGIN}"x"${MARGIN}" \
+  "$img"
+
+lp "${PRINTER_OPT[ @]}" "${FIT_OPT[ @]}" "$img"
+
+if [[ "$FORCE_CUT" -eq 1 ]]; then
+  printf '\x1D\x56\x00' | lp "${PRINTER_OPT[ @]}" -o raw
+fi
