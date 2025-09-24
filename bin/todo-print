@@ -1,87 +1,52 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# todo-print — Rongta ESC/POS: 2× title, points on next line (keeps '('), feed & cut
 set -euo pipefail
-VERSION="0.1.0"
 
-usage() {
-  cat <<'USAGE'
-todo-print — print a TODO on a receipt printer (one ticket per run)
+PRINTER="RONGTA_RAW"                 # your RAW CUPS queue
+MSG="${*:?Usage: todo-print \"Title (N pts)\"}"
 
-USAGE:
-  todo-print "MESSAGE (N points)"
+# Feed length: ~3 lines ≈ 25–30 mm; adjust 4–6 to taste
+FEED_LINES=5
 
-OPTIONS:
-  -p, --printer NAME   CUPS printer name (default: system default)
-  -w, --width-mm MM    Paper width in millimeters (default: 80)
-  -d, --dpi N          Render DPI (default: 203)
-  -s, --pointsize N    Font point size (default: auto)
-  -f, --font NAME      Font family (default: DejaVuSans-Bold)
-  -m, --margin PX      Margin (pixels) (default: 24)
-  -n, --no-fit         Don’t pass -o fit-to-page
-  -c, --cut            Force ESC/POS full cut (RAW queue only)
-  -V, --version        Show version
-  -h, --help           Show help
-USAGE
-}
+# Accept explicit "\n" in CLI (e.g., todo-print $'Title\n(3 pts)')
+MSG=$(echo -e "$MSG")
+FIRST_LINE=$(echo "$MSG" | head -n1)
+REST=$(echo "$MSG" | tail -n +2)
 
-PRINTER_OPT=()
-WIDTH_MM=80
-DPI=203
-POINTSIZE=""
-FONT="DejaVuSans-Bold"
-MARGIN=24
-FIT_OPT=(-o fit-to-page)
-FORCE_CUT=0
-ARGS=()
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -p|--printer) PRINTER_OPT=(-d "$2"); shift 2;;
-    -w|--width-mm) WIDTH_MM="$2"; shift 2;;
-    -d|--dpi) DPI="$2"; shift 2;;
-    -s|--pointsize) POINTSIZE="$2"; shift 2;;
-    -f|--font) FONT="$2"; shift 2;;
-    -m|--margin) MARGIN="$2"; shift 2;;
-    -n|--no-fit) FIT_OPT=(); shift;;
-    -c|--cut) FORCE_CUT=1; shift;;
-    -V|--version) echo "$VERSION"; exit 0;;
-    -h|--help) usage; exit 0;;
-    --) shift; break;;
-    -*) echo "Unknown option: $1" >&2; usage; exit 2;;
-    *)  ARGS+=("$1"); shift;;
-  esac
-done
-
-if [[ ${#ARGS[ @]} -eq 0 ]]; then
-  echo "Error: MESSAGE is required."; usage; exit 2
-fi
-MESSAGE="${ARGS[*]}"
-
-# compute width in pixels
-width_px=$(python3 - <<PY
-import math
-print(int(round(($WIDTH_MM/25.4)*$DPI)))
-PY
-)
-
-# default font size
-if [[ -z "$POINTSIZE" ]]; then
-  POINTSIZE=$(( width_px * 28 / 100 ))
-  (( POINTSIZE < 60 )) && POINTSIZE=60
-  (( POINTSIZE > 220 )) && POINTSIZE=220
+# --- Split at first '(' WITHOUT losing it ---
+if [[ -z "$REST" && "$FIRST_LINE" == *"("* ]]; then
+  TITLE="${FIRST_LINE%%\(*}"          # up to ( but not including
+  POINTS="${FIRST_LINE#"$TITLE"}"     # starts with '(' exactly
+else
+  TITLE="$FIRST_LINE"
+  POINTS="$REST"
 fi
 
-workdir="$(mktemp -d)"; trap 'rm -rf "$workdir"' EXIT
-img="$workdir/todo.png"
+# Trim spaces (won't strip the '(')
+TITLE="$(echo "$TITLE"  | sed 's/^[[:space:]]\+//; s/[[:space:]]\+$//')"
+POINTS="$(echo "$POINTS" | sed 's/^[[:space:]]\+//; s/[[:space:]]\+$//')"
 
-convert -background white -fill black \
-  -gravity center -font "$FONT" -pointsize "$POINTSIZE" \
-  -size "${width_px}x3000" \
-  caption:"$MESSAGE" \
-  -trim +repage -bordercolor white -border "${MARGIN}"x"${MARGIN}" \
-  "$img"
+# --- ESC/POS controls ---
+RESET=$'\x1B\x40'       # Initialize
+CENTER=$'\x1B\x61\x01'  # Align center
+LEFT=$'\x1B\x61\x00'
+BIG2=$'\x1D\x21\x11'    # 2× width & 2× height (the size you liked)
+NORMAL=$'\x1D\x21\x00'
+CUT=$'\x1D\x56\x01'     # Full cut (feed then cut)
 
-lp "${PRINTER_OPT[ @]}" "${FIT_OPT[ @]}" "$img"
+# Build feed as plain newlines (simple, reliable)
+FEED=""
+for ((i=0; i<FEED_LINES; i++)); do FEED+=$'\n'; done
 
-if [[ "$FORCE_CUT" -eq 1 ]]; then
-  printf '\x1D\x56\x00' | lp "${PRINTER_OPT[ @]}" -o raw
-fi
+# --- Emit one clean byte stream ---
+{
+  printf "%b" "$RESET$CENTER$BIG2"
+  printf "%s\n" "$TITLE"
+
+  if [[ -n "$POINTS" ]]; then
+    printf "%b" "$NORMAL"
+    printf "%s\n" "$POINTS"
+  fi
+
+  printf "%b" "$LEFT$FEED$CUT"
+} | lp -d "$PRINTER" -o raw
